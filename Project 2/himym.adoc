@@ -1,0 +1,578 @@
+You can view this document @ http://bit.ly/himym-graph
+
+= Neo4j London Meetup, 2nd June 2015
+== The How I met your mother graph
+
+In this session we'll be working with a graph of How I met your mother scrapped from the link:http://how-i-met-your-mother.wikia.com/wiki/How_I_Met_Your_Mother_Wiki[HIMYM wiki].
+
+We're going to write some queries to explore the dataset and learn Neo4j’s cypher language while doing so.
+If we have time we can even look at how to merge some other data sets in as well.
+
+You'll want to get the Cypher cheatsheet open on one of your browser tabs - http://neo4j.com/docs/stable/cypher-refcard/
+
+== Setup
+
+First things first, let's get Neo4j running on your machines.
+
+* Download Neo4j from http://www.neo4j.com/download
+* Windows users: Install desktop application & then click the 'start' button
+* Mac/Linux: Unpack the tarball & then `./bin/neo4j start`
+* Browse to http://localhost:7474
+
+And we're ready to go!
+
+== The Episodes
+
+The first thing we need to do is load the episodes into Neo4j.
+I've already done the scrapping of the data into a CSV file which is hosted on github.
+
+We'll start by exploring that using Cypher `LOAD CSV` command.
+The `LOAD CSV` command allows us to process CSV files hosted on a web server or our local file system.
+
+The syntax looks like this:
+
+[source, text]
+----
+LOAD CSV [WITH HEADERS] FROM "http or file URI" AS row
+[FIELDTERMINATOR ","]
+[MATCH MERGE RETURN WITH]
+----
+
+Let's give it a try:
+
+[source, cypher]
+----
+LOAD CSV WITH HEADERS FROM "https://raw.githubusercontent.com/mneedham/neo4j-himym/master/data/import/episodes_full.csv" AS row
+RETURN row
+LIMIT 1
+----
+
+If you run that query you should see the following output:
+
+//table
+
+We can see that an episode has lots of different attributes - a title, date aired, season, ranking etc.
+
+Now let's create an episode node for each row of the CSV file. We'll do this by combining the `LOAD CSV` command with the `MERGE` command.
+
+=== What's `MERGE` got to do with it?
+
+The `MERGE` command does a `MATCH` or `CREATE` i.e. if the node already exists then we'll return it and if it doesn't then we'll create it.
+
+It's quite useful in this context as we may want to run our import script multiple times but don't want to end up with duplicate episodes.
+
+The syntax of `MERGE` is as follows:
+
+[source, text]
+----
+MERGE (:Label1:Label2 {id: "primaryKeyValue"})
+----
+
+Let's introduce it into our `LOAD CSV` query:
+
+[source, cypher]
+----
+LOAD CSV WITH HEADERS FROM "https://raw.githubusercontent.com/mneedham/neo4j-himym/master/data/import/episodes_full.csv" AS row
+MERGE (episode:Episode {id: toint(row.NumberOverall)})
+ON CREATE SET episode.title = row.Title,
+              episode.viewers = toFloat(row.Viewers),
+              episode.dateAired = row.DateAired,
+              episode.timestamp = toint(row.Timestamp),
+              episode.number = toint(row.NumberInSeason),
+              episode.season = toint(row.Season),
+              episode.ranking = toint(row.Rating)
+----
+
+If everything has run properly you should now have 208 nodes in your database.
+Let's write a query to check that:
+
+[source, cypher]
+----
+MATCH (:Episode)
+RETURN COUNT(*) AS numberOfEpisodes
+----
+
+//table
+
+Great!
+The `COUNT` function does an implicit group by using any non aggregate fields as its key.
+In this case there are no other fields so it just counts all the rows returned by the `MATCH` clause.
+
+=== Finding specific episodes
+
+By now you should have all the episodes loaded so let's try and find some individual episodes.
+We'll start by finding an episode by its `id` which in this case is its overall position in the series:
+
+[source, cypher]
+----
+MATCH (episode:Episode)
+WHERE episode.id = 5
+RETURN episode
+----
+
+or we can use a bit of syntactic sugar:
+
+[source, cypher]
+----
+MATCH (episode:Episode {id: 5})
+RETURN episode
+----
+
+//table
+
+==== Exercises
+
+* Find an episode by title rather than by id
+* Only return the `title` and `dateAired` properties rather than all the properties
+* Which episode had the highest viewership?
+
+=== What's happening under the covers?
+
+We have two ways of exploring what Neo4j is doing when we execute a query.
+
+Prefixing a query with `EXPLAIN` will return the query plan based on statistics the database has. It won't run the query.
+
+Prefixing a query with `PROFILE` will run the query and return the actual query plan that was executed.
+
+Give those a try with the queries we just ran. What do you notice?
+
+=== Index all the things
+
+Let's add an index on a few properties of an episode so that we can find them more quickly in future without having to scan through all the episodes
+
+[source, cypher]
+----
+CREATE INDEX ON :Episode(id)
+----
+
+[source, cypher]
+----
+CREATE INDEX ON :Episode(title)
+----
+
+Now try re-profiling the query where we looked up a particular episode.
+You should see a different operator being used than before.
+This indicates that the index is being used which is exactly what we wanted to see.
+
+When you're writing cypher queries `EXPLAIN` and `PROFILE` should be the first thing you turn to if queries aren't running as fast as you expect.
+
+Anyway enough of that for now, let's import some more data to make it more of a graph and less of a key/value store.
+
+=== Seasons
+
+If you explored the episodes data carefully you'll remember that we actually stored a `season` property on the episode nodes.
+
+This is fine if we only intend to use the season as meta data but if we want to write queries that start with a season it would be better off represented as a node.
+
+We can refactor the graph to introduce season as a first class citizen with the following query:
+
+// output
+[source, cypher]
+----
+MATCH (episode:Episode)
+MERGE (season:Season {number: episode.season})
+MERGE (episode)-[:IN_SEASON]->(season)
+----
+
+This query has three steps:
+
+* Look up all the episodes
+* Create `season` nodes using the `MERGE` command so we don't get duplicates
+* Create a relationship from the episode to its season
+
+==== Exercise
+
+* How many episodes were there in each season?
+
+=== Finding next/previous episodes
+
+Let's say we've looked up an episode and we want to get the next episode.
+How would we do that?
+
+[source, cypher]
+----
+MATCH (episode:Episode {id: 6})
+
+WITH episode
+MATCH (nextEpisode:Episode {id: episode.id + 1})
+RETURN episode, nextEpisode
+----
+
+//table
+
+or we can feed in the episode numbers from outside
+
+[source, cypher]
+----
+MATCH (episode:Episode)
+WHERE episode.id IN [6,7]
+RETURN episode
+----
+
+//table
+
+Alternatively we can introduce an explicit relationship between the episodes to make this type of query easier.
+We want to connect every pair of adjacent episode nodes with a `NEXT_EPISODE` relationship
+
+// output
+[source, cypher]
+----
+MATCH (episode:Episode)
+
+WITH episode
+ORDER BY episode.id
+
+WITH COLLECT(episode) AS episodes
+FOREACH(i in RANGE(0, length(episodes)-2) |
+FOREACH(n1 in [episodes[i]] | FOREACH(n2 in [episodes[i+1]] |
+    MERGE (n1)-[:NEXT_EPISODE]->(n2))))
+----
+
+//table
+
+First we get all the episodes sorted in `id` order and collect them into an (ordered) array using the `COLLECT` function.
+We use the outer `FOREACH` function to iterate over all the events and ideally we'd just connect `episodes[i]` and `episodes[i+1]` directly.
+Unfortunately this isn't valid Cypher so instead we create two arrays of length 1 and `FOREACH` over those and execute the `MERGE` command.
+
+Now let's rewrite our earlier query which found episode 6 and the next episode:
+
+[source, cypher]
+----
+MATCH (episode:Episode {id: 6})-[:NEXT_EPISODE]->(nextEpisode)
+RETURN episode, nextEpisode
+----
+
+//table
+
+Not bad.
+If we want to get the next 5 episodes we'd write the following query:
+
+[source, cypher]
+----
+MATCH (episode:Episode {id: 6})-[:NEXT_EPISODE*1..5]->(nextEpisode)
+RETURN episode, nextEpisode
+----
+
+//table
+
+There's a bit of duplication here in that episode 6 is repeated on every line.
+We can fix that with a slight tweak of the query:
+
+[source, cypher]
+----
+MATCH (:Episode {id: 6})-[:NEXT_EPISODE*0..5]->(episode)
+RETURN episode
+----
+
+//table
+
+As you can see from the output, putting a `0` after the `NEXT_EPISODE` makes it include episode 6 which is exactly what we want.
+
+When we created the episodes at the beginning of the session we stored a `timestamp` property of when the episode was broadcast.
+With our new `NEXT_EPISODE` relationship we can write a query to see how long viewers were made to wait between episodes:
+
+[source, cypher]
+----
+MATCH (episode:Episode)-[:NEXT_EPISODE]->(next)
+RETURN episode.title, next.title, (next.timestamp - episode.timestamp) / 60 / 60 / 24 as daysWait
+LIMIT 10
+----
+
+//table
+
+==== Exercises
+
+* Find the double headers (episodes on the same day)
+* What was the longest time viewers had to wait between the end of one season and start of the next?
+
+Before we move on we're going to create a linked list of the seasons as well.
+This time we're going to use the `UNWIND` command rather than `FOREACH`.
+
+`UNWIND` takes in a collection of values and returns a sequence of rows.
+That comes in quite useful for connecting adjacent nodes:
+
+[source, cypher]
+----
+MATCH (season:Season)
+WITH season ORDER BY season.number
+WITH COLLECT(season) AS seasons
+
+UNWIND range(0,size(seasons)-2) AS i
+WITH seasons[i] AS s1, seasons[i+1] AS s2
+MERGE (s1)-[:TO]->(s2)
+----
+
+=== References
+
+The wiki also contains information about the references that episodes make to each other.
+Let's load this into the graph:
+
+[source, cypher]
+----
+LOAD CSV WITH HEADERS FROM "https://raw.githubusercontent.com/mneedham/neo4j-himym/master/data/import/references.csv" AS row
+MERGE (:Reference {text: row.ReferenceText})
+----
+
+[source, cypher]
+----
+LOAD CSV WITH HEADERS FROM "https://raw.githubusercontent.com/mneedham/neo4j-himym/master/data/import/references.csv" AS row
+MATCH (reference:Reference {text: row.ReferenceText})
+MATCH (referenced:Episode {id: toint(row.ReferencedEpisodeId)})
+MERGE (referenced)<-[:HAPPENED_IN]-(reference)
+----
+
+[source, cypher]
+----
+LOAD CSV WITH HEADERS FROM "https://raw.githubusercontent.com/mneedham/neo4j-himym/master/data/import/references.csv" AS row
+MATCH (reference:Reference {text: row.ReferenceText})
+MATCH (referencing:Episode {id: toint(row.ReferencingEpisodeId)})
+MERGE (referencing)-[:REFERENCES]->(reference)
+----
+
+Let's have a quick check that we've got that imported correctly:
+
+[source, cypher]
+----
+MATCH (episode:Episode)<-[:HAPPENED_IN]-(reference)<-[:REFERENCES]-(otherEpisode)
+RETURN episode, reference, otherEpisode
+LIMIT 10
+----
+
+If we're about to watch episode 5 and want to know which episodes we need to have seen for the references to make sense we could write the following query:
+
+[source, cypher]
+----
+MATCH (episode:Episode {id: 5})-[:REFERENCES]->(reference)-[:HAPPENED_IN]-(otherEpisode)
+RETURN otherEpisode
+----
+
+//table
+
+==== Exercise
+
+* Which episode is referenced most often?
+* Which episodes don't have any references? (Hint: look for `NOT` under the predicates section of the refcard)
+
+If we want to get a list of all the episodes and the number of times they're referenced we'd write the following query:
+
+[source, cypher]
+----
+MATCH (episode:Episode)
+OPTIONAL MATCH (episode)<-[r:HAPPENED_IN]->()
+RETURN episode.season, episode.number, episode.title, COUNT(r) AS references
+ORDER BY references DESC
+LIMIT 10
+----
+
+We've introduced `OPTIONAL MATCH` which acts like a `LEFT JOIN` in SQL.
+We definitely want to return a row for the episode even if it doesn't have a `HAPPENED_IN` relationship going out.
+This allows us to still return episodes which don't have any references.
+
+It'd be quite cool to answer the following question:
+
+> For episode {x} which episodes should I have seen to understand all the references made?
+
+In order to answer that question we need to create a relationship between each episode that references another one.
+This relationship is already implicit via the `Reference` nodes.
+Let's make it explicit:
+
+//output
+[source, cypher]
+----
+MATCH (episode:Episode)-[:REFERENCES]->()-[:HAPPENED_IN]-(otherEpisode:Episode)
+MERGE (episode)-[:REFERENCES_EPISODE]->(otherEpisode)
+----
+
+Now let's say we want to know what references episode `126` has.
+If we want to find it's direct references we could write the following query:
+
+[source,cypher]
+----
+MATCH (episode:Episode {id: 126})-[:REFERENCES_EPISODE]->(otherEpisode)
+RETURN  otherEpisode.id, otherEpisode.season, otherEpisode.number,  otherEpisode.title
+ORDER BY otherEpisode.id
+----
+
+//table
+
+If we want to find all the pre-requisite episodes it's just a slight tweak:
+
+[source, cypher]
+----
+MATCH (episode:Episode {id: 126})-[:REFERENCES_EPISODE*]->(otherEpisode)
+RETURN DISTINCT otherEpisode.id, otherEpisode.season, otherEpisode.number,  otherEpisode.title
+ORDER BY otherEpisode.id
+----
+
+//table
+
+What if we're on episode 1 and we want to know the quickest way to get to episode 126.
+Shortest path to the rescue!
+
+[source, cypher]
+----
+MATCH path = shortestpath((episode:Episode {id: 208})-[:REFERENCES_EPISODE*]->(otherEpisode:Episode {id: 1}))
+return path
+----
+
+//graph
+
+`shortestpath` will find the path containing the least number of relationships between two nodes.
+In this case we've constrained it to only evaluate the `REFERENCES_EPISODE` relationship but we could relax that constraint:
+
+[source, cypher]
+----
+MATCH path = shortestpath((episode:Episode {id: 208})-[*]-(otherEpisode:Episode {id: 1}))
+return path
+----
+
+//graph
+
+==== Exercise
+
+* What's the longest possible path of pre-requisites we could take? (Hint: use the LENGTH function)
+
+== Topics graph
+
+I ran the transcript for each of the episodes through link:https://github.com/Prismatic/interest-graph[Prismatic's Topic Graph] and stored the results into a CSV file.
+We can add this to the graph as well:
+
+//output
+[source, cypher]
+----
+LOAD CSV WITH HEADERS FROM "https://raw.githubusercontent.com/mneedham/neo4j-himym/master/data/import/topics.csv" AS row
+MERGE (topic:Topic {id: toint(row.TopicId)})
+ON CREATE SET topic.value = row.Topic
+----
+
+//output
+[source, cypher]
+----
+LOAD CSV WITH HEADERS FROM "https://raw.githubusercontent.com/mneedham/neo4j-himym/master/data/import/topics.csv" AS row
+MATCH (topic:Topic {id: toint(row.TopicId)})
+MATCH (episode:Episode {id: toint(row.EpisodeId)})
+MERGE (episode)-[:TOPIC {score: TOFLOAT(row.Score)}]->(topic)
+----
+
+While we're at it let's also add the characters, writers and directors:
+
+//output
+[source, cypher]
+----
+LOAD CSV WITH HEADERS FROM "https://raw.githubusercontent.com/mneedham/neo4j-himym/master/data/import/characters.csv" AS row
+MATCH (episode:Episode {id: TOINT(row.EpisodeId)})
+MERGE (character:Character {name: row.Character})
+MERGE (character)-[:APPEARED_IN_EPISODE]->(episode)
+----
+
+//output
+[source, cypher]
+----
+LOAD CSV WITH HEADERS FROM "https://raw.githubusercontent.com/mneedham/neo4j-himym/master/data/import/episodes_full.csv" AS row
+MATCH (episode:Episode {id: TOINT(row.NumberOverall)})
+MERGE (person:Person {name: row.Director})
+MERGE (person)-[:DIRECTED_EPISODE]->(episode)
+----
+
+//output
+[source, cypher]
+----
+LOAD CSV WITH HEADERS FROM "https://raw.githubusercontent.com/mneedham/neo4j-himym/master/data/import/episodes_full.csv" AS row
+MATCH (episode:Episode {id: TOINT(row.NumberOverall)})
+WITH split(row.Writers, ",") AS writers, episode
+UNWIND writers AS writer
+MERGE (person:Person {name: writer})
+MERGE (person)-[:WROTE_EPISODE]->(episode);
+----
+
+What topics do writers tend to write about?
+
+[source, cypher]
+----
+match (writer:Person)-[:WROTE_EPISODE]->()-[:TOPIC]->(topic)
+RETURN writer.name, topic.value, COUNT(*) AS times
+ORDER BY times DESC
+----
+
+//table
+
+There tends to be more than one writer on a show though.
+Let's see what topics combinations of writers cover.
+
+[source, cypher]
+----
+match (writer1:Person)-[:WROTE_EPISODE]->(episode)-[:TOPIC]->(topic),
+      (writer2:Person)-[:WROTE_EPISODE]->(episode)
+RETURN writer1.name, writer2.name, topic.value, COUNT(*) AS times
+ORDER BY times DESC
+----
+
+Do we ever have more than one writer on an episode?
+
+[source, cypher]
+----
+match (writer)-[:WROTE_EPISODE]->(episode:Episode)
+WITH episode, COUNT(writer) AS numberOfWriters
+WHERE numberOfWriters > 2
+RETURN episode, numberOfWriters
+----
+
+We've used the `WITH` command before for different reasons.
+Here we're using it so we can filter based on an aggregation.
+
+==== Exercises
+
+* One of the topics in the dataset is `Divorce`. Can you find out which episode had that topic?
+* What other topics did that episode have?
+
+== Recommendations
+
+The final thing we're going to look at is how to make recommendations to HIMYM viewers.
+Let's say that our imaginary viewer really liked episode 7 and wants to watch other episodes which covered the same topics.
+How would we write a query to do that?
+
+[source, cypher]
+----
+match (episode:Episode {id: 7})-[:TOPIC]->(topic)<-[:TOPIC]-(otherEpisode)
+RETURN otherEpisode.title, COUNT(*) AS times, COLLECT(topic.value) AS topics
+ORDER BY times DESC
+LIMIT 10
+----
+
+//table
+
+In this example we were ordering by how many topics the other episodes had in common.
+What if instead of doing that we weight each topic based on how many episodes in total have that topic?
+
+First we need to create a weighting for each topic.
+We'll give it an inverse score based on how many episodes it appears in:
+
+[source, cypher]
+----
+match (:Episode)
+WITH COUNT(*) AS maxTimes
+MATCH (topic:Topic)<-[:TOPIC]-()
+
+WITH topic, COUNT(*) AS times, maxTimes
+RETURN topic, 1.0 - (1.0 * times / maxTimes) AS weight
+LIMIT 10
+----
+
+Now let's combine that with episode 7 to see which episodes we should recommend.
+
+[source, cypher]
+----
+match (:Episode)
+WITH COUNT(*) AS maxTimes
+MATCH (topic:Topic)<-[:TOPIC]-()
+
+WITH topic, COUNT(*) AS times, maxTimes
+WITH topic, 1.0 - (1.0 * times / maxTimes) AS weight
+MATCH (episode:Episode {id: 7})-[:TOPIC]->(topic)<-[:TOPIC]-(otherEpisode)
+
+WITH otherEpisode, COLLECT({topic: topic.value, weight: weight}) AS topics
+RETURN otherEpisode.title, REDUCE(acc = 0, entry in topics | acc + entry.weight) AS score, topics
+ORDER BY score DESC
+----
+
+And that's all for today!
